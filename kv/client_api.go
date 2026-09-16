@@ -22,11 +22,15 @@ const opPut = "Put"
 type NotLeaderError struct {
 	LeaderID   string
 	LeaderAddr string
+	LeaderHTTP string
 }
 
 func (e *NotLeaderError) Error() string {
 	if e.LeaderID == "" {
 		return "not leader (unknown leader)"
+	}
+	if e.LeaderHTTP != "" {
+		return fmt.Sprintf("not leader; try %s (%s)", e.LeaderID, e.LeaderHTTP)
 	}
 	if e.LeaderAddr != "" {
 		return fmt.Sprintf("not leader; try %s (%s)", e.LeaderID, e.LeaderAddr)
@@ -38,9 +42,10 @@ func (e *NotLeaderError) Unwrap() error { return raft.ErrNotLeader }
 
 // Server is the client-facing KV API. Only the Raft leader accepts Get/Put.
 type Server struct {
-	raft    *raft.RaftNode
-	store   *Store
-	timeout time.Duration
+	raft      *raft.RaftNode
+	store     *Store
+	timeout   time.Duration
+	httpAddrs map[string]string
 }
 
 // NewServer wraps a Raft node and in-memory store. It registers the apply callback.
@@ -59,6 +64,9 @@ func NewServer(node *raft.RaftNode, store *Store) *Server {
 
 // SetTimeout overrides the wait for a Put to commit.
 func (s *Server) SetTimeout(d time.Duration) { s.timeout = d }
+
+// SetHTTPAddrs records HTTP advertise addresses (id → host:port) used in redirects.
+func (s *Server) SetHTTPAddrs(addrs map[string]string) { s.httpAddrs = addrs }
 
 func (s *Server) onApply(msg raft.ApplyMsg) {
 	if len(msg.Command) == 0 {
@@ -117,6 +125,7 @@ type Status struct {
 	Term         int      `json:"term"`
 	LeaderID     string   `json:"leader_id"`
 	LeaderAddr   string   `json:"leader_addr,omitempty"`
+	LeaderHTTP   string   `json:"leader_http,omitempty"`
 	VotedFor     string   `json:"voted_for"`
 	CommitIndex  int      `json:"commit_index"`
 	LastApplied  int      `json:"last_applied"`
@@ -128,12 +137,14 @@ type Status struct {
 // Status reports the current node.
 func (s *Server) Status() Status {
 	n := s.raft
+	leaderID := n.LeaderID()
 	return Status{
 		ID:           n.ID(),
 		State:        n.State().String(),
 		Term:         n.CurrentTerm(),
-		LeaderID:     n.LeaderID(),
+		LeaderID:     leaderID,
 		LeaderAddr:   n.LeaderAddr(),
+		LeaderHTTP:   s.httpAddr(leaderID),
 		VotedFor:     n.VotedFor(),
 		CommitIndex:  n.CommitIndex(),
 		LastApplied:  n.LastApplied(),
@@ -144,10 +155,19 @@ func (s *Server) Status() Status {
 }
 
 func (s *Server) notLeader() error {
+	id := s.raft.LeaderID()
 	return &NotLeaderError{
-		LeaderID:   s.raft.LeaderID(),
+		LeaderID:   id,
 		LeaderAddr: s.raft.LeaderAddr(),
+		LeaderHTTP: s.httpAddr(id),
 	}
+}
+
+func (s *Server) httpAddr(id string) string {
+	if id == "" || s.httpAddrs == nil {
+		return ""
+	}
+	return s.httpAddrs[id]
 }
 
 // Node returns the underlying Raft node.

@@ -22,11 +22,12 @@ import (
 
 func main() {
 	var (
-		id       = flag.String("id", "n1", "node id")
-		raftAddr = flag.String("raft-addr", "127.0.0.1:19101", "gRPC listen address for Raft and KV RPCs")
-		httpAddr = flag.String("http-addr", "127.0.0.1:18101", "HTTP listen address for Get/Put/status")
-		peers    = flag.String("peers", "", "cluster membership as id=host:port,id=host:port (must include self)")
-		dev      = flag.Bool("dev", false, "start a 3-node in-process cluster on ports 19101-19103 / 18101-18103")
+		id        = flag.String("id", "n1", "node id")
+		raftAddr  = flag.String("raft-addr", "127.0.0.1:19101", "gRPC listen address for Raft and KV RPCs")
+		httpAddr  = flag.String("http-addr", "127.0.0.1:18101", "HTTP listen address for Get/Put/status")
+		peers     = flag.String("peers", "", "cluster membership as id=host:port,id=host:port (must include self)")
+		httpPeers = flag.String("http-peers", "", "optional HTTP advertise map id=host:port,id=host:port for redirects")
+		dev       = flag.Bool("dev", false, "start a 3-node in-process cluster on ports 19101-19103 / 18101-18103")
 	)
 	flag.Parse()
 
@@ -49,14 +50,22 @@ func main() {
 		peerAddrs[*id] = *raftAddr
 	}
 
-	if err := runNode(*id, *raftAddr, *httpAddr, peerAddrs, logger); err != nil {
+	httpAddrs := parsePeers(*httpPeers)
+	if *httpAddr != "" {
+		if httpAddrs == nil {
+			httpAddrs = map[string]string{}
+		}
+		httpAddrs[*id] = *httpAddr
+	}
+
+	if err := runNode(*id, *raftAddr, *httpAddr, peerAddrs, httpAddrs, logger); err != nil {
 		logger.Error("node failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func runNode(id, raftAddr, httpAddr string, peerAddrs map[string]string, logger *slog.Logger) error {
-	node, srv, gs, httpSrv, err := startNode(id, raftAddr, httpAddr, peerAddrs, logger)
+func runNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, logger *slog.Logger) error {
+	node, _, gs, httpSrv, err := startNode(id, raftAddr, httpAddr, peerAddrs, httpAddrs, logger)
 	if err != nil {
 		return err
 	}
@@ -75,16 +84,16 @@ func runNode(id, raftAddr, httpAddr string, peerAddrs map[string]string, logger 
 	case <-ctxDone:
 	case <-time.After(3 * time.Second):
 	}
-	_ = srv
 	return nil
 }
 
-func startNode(id, raftAddr, httpAddr string, peerAddrs map[string]string, logger *slog.Logger) (*raft.RaftNode, *kv.Server, *grpc.Server, *http.Server, error) {
+func startNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, logger *slog.Logger) (*raft.RaftNode, *kv.Server, *grpc.Server, *http.Server, error) {
 	cfg := raft.DefaultConfig(id, peerAddrs)
 	cfg.Logger = logger
 	node := raft.NewNode(cfg)
 	store := kv.NewStore()
 	kvSrv := kv.NewServer(node, store)
+	kvSrv.SetHTTPAddrs(httpAddrs)
 
 	transport := raft.NewGRPCTransport(peerAddrs)
 	node.SetTransport(transport)
@@ -131,7 +140,7 @@ func runDevCluster(logger *slog.Logger) error {
 	}
 	var nodes []running
 	for _, id := range ids {
-		node, _, gs, httpSrv, err := startNode(id, peerAddrs[id], httpAddrs[id], peerAddrs, logger)
+		node, _, gs, httpSrv, err := startNode(id, peerAddrs[id], httpAddrs[id], peerAddrs, httpAddrs, logger)
 		if err != nil {
 			return err
 		}
@@ -197,6 +206,7 @@ func writeErr(w http.ResponseWriter, err error) {
 			"error":       "not_leader",
 			"leader_id":   nl.LeaderID,
 			"leader_addr": nl.LeaderAddr,
+			"leader_http": nl.LeaderHTTP,
 		})
 		return
 	}
