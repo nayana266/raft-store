@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ type Config struct {
 	IDs       []string
 	RaftAddrs map[string]string
 	HTTPAddrs map[string]string
+	DataDir   string // if set, each node persists under DataDir/<id>
 }
 
 // DevConfig is the three-node layout used by `go run ./cmd -dev`.
@@ -35,6 +37,7 @@ func DevConfig() Config {
 			"n2": "127.0.0.1:18102",
 			"n3": "127.0.0.1:18103",
 		},
+		DataDir: "data",
 	}
 }
 
@@ -118,6 +121,9 @@ func (c *Cluster) startMember(id string) error {
 
 	rCfg := raft.DefaultConfig(id, cfg.RaftAddrs)
 	rCfg.Logger = logger
+	if cfg.DataDir != "" {
+		rCfg.Storage = raft.NewFileStorage(filepath.Join(cfg.DataDir, id))
+	}
 	node := raft.NewNode(rCfg)
 	store := kv.NewStore()
 	kvSrv := kv.NewServer(node, store)
@@ -166,7 +172,7 @@ func (c *Cluster) startMember(id string) error {
 		Crashed: false,
 	}
 	c.mu.Unlock()
-	logger.Info("node started", "id", id, "raft", raftAddr, "http", httpAddr)
+	logger.Info("node started", "id", id, "raft", raftAddr, "http", httpAddr, "data", filepath.Join(cfg.DataDir, id))
 	return nil
 }
 
@@ -242,8 +248,8 @@ func (c *Cluster) Crash(id string) error {
 	return nil
 }
 
-// Restart boots a crashed node with a fresh in-memory log. The leader will
-// catch it up via AppendEntries (there is still no disk persistence).
+// Restart boots a crashed node. It reloads term/log from disk (if DataDir is set)
+// and the leader catches commitIndex up via AppendEntries.
 func (c *Cluster) Restart(id string) error {
 	c.mu.Lock()
 	m, ok := c.members[id]

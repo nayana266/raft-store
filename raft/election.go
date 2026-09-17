@@ -20,6 +20,7 @@ func (n *RaftNode) startElectionLocked() {
 	n.leaderID = ""
 	n.votesReceived = map[string]bool{n.id: true}
 	n.resetElectionTimerLocked()
+	n.persistLocked()
 
 	term := n.currentTerm
 	req := &RequestVoteRequest{
@@ -94,6 +95,7 @@ func (n *RaftNode) HandleRequestVote(req *RequestVoteRequest) *RequestVoteRespon
 	if canVote && upToDate {
 		n.votedFor = req.CandidateID
 		n.resetElectionTimerLocked()
+		n.persistLocked()
 		resp.VoteGranted = true
 		n.logger.Info("granted vote", "to", req.CandidateID, "term", n.currentTerm)
 	}
