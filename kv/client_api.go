@@ -59,6 +59,7 @@ func NewServer(node *raft.RaftNode, store *Store) *Server {
 		timeout: 3 * time.Second,
 	}
 	node.SetApply(s.onApply)
+	node.SetSnapshotter(store)
 	return s
 }
 
@@ -120,18 +121,20 @@ func (s *Server) Get(key string) (string, bool, error) {
 
 // Status is a snapshot of Raft + KV for debugging and the HTTP /status endpoint.
 type Status struct {
-	ID           string   `json:"id"`
-	State        string   `json:"state"`
-	Term         int      `json:"term"`
-	LeaderID     string   `json:"leader_id"`
-	LeaderAddr   string   `json:"leader_addr,omitempty"`
-	LeaderHTTP   string   `json:"leader_http,omitempty"`
-	VotedFor     string   `json:"voted_for"`
-	CommitIndex  int      `json:"commit_index"`
-	LastApplied  int      `json:"last_applied"`
-	LastLogIndex int      `json:"last_log_index"`
-	KVSize       int      `json:"kv_size"`
-	Peers        []string `json:"peers"`
+	ID            string   `json:"id"`
+	State         string   `json:"state"`
+	Term          int      `json:"term"`
+	LeaderID      string   `json:"leader_id"`
+	LeaderAddr    string   `json:"leader_addr,omitempty"`
+	LeaderHTTP    string   `json:"leader_http,omitempty"`
+	VotedFor      string   `json:"voted_for"`
+	CommitIndex   int      `json:"commit_index"`
+	LastApplied   int      `json:"last_applied"`
+	LastLogIndex  int      `json:"last_log_index"`
+	SnapshotIndex int      `json:"snapshot_index"`
+	LogLen        int      `json:"log_len"`
+	KVSize        int      `json:"kv_size"`
+	Peers         []string `json:"peers"`
 }
 
 // Status reports the current node.
@@ -139,18 +142,20 @@ func (s *Server) Status() Status {
 	n := s.raft
 	leaderID := n.LeaderID()
 	return Status{
-		ID:           n.ID(),
-		State:        n.State().String(),
-		Term:         n.CurrentTerm(),
-		LeaderID:     leaderID,
-		LeaderAddr:   n.LeaderAddr(),
-		LeaderHTTP:   s.httpAddr(leaderID),
-		VotedFor:     n.VotedFor(),
-		CommitIndex:  n.CommitIndex(),
-		LastApplied:  n.LastApplied(),
-		LastLogIndex: n.LastLogIndex(),
-		KVSize:       s.store.Len(),
-		Peers:        n.PeerIDs(),
+		ID:            n.ID(),
+		State:         n.State().String(),
+		Term:          n.CurrentTerm(),
+		LeaderID:      leaderID,
+		LeaderAddr:    n.LeaderAddr(),
+		LeaderHTTP:    s.httpAddr(leaderID),
+		VotedFor:      n.VotedFor(),
+		CommitIndex:   n.CommitIndex(),
+		LastApplied:   n.LastApplied(),
+		LastLogIndex:  n.LastLogIndex(),
+		SnapshotIndex: n.SnapshotIndex(),
+		LogLen:        n.LogLen(),
+		KVSize:        s.store.Len(),
+		Peers:         n.PeerIDs(),
 	}
 }
 

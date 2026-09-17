@@ -119,13 +119,14 @@ func (c *Cluster) startMember(id string) error {
 	}
 	httpAddr := cfg.HTTPAddrs[id]
 
+	store := kv.NewStore()
 	rCfg := raft.DefaultConfig(id, cfg.RaftAddrs)
 	rCfg.Logger = logger
+	rCfg.Snapshotter = store
 	if cfg.DataDir != "" {
 		rCfg.Storage = raft.NewFileStorage(filepath.Join(cfg.DataDir, id))
 	}
 	node := raft.NewNode(rCfg)
-	store := kv.NewStore()
 	kvSrv := kv.NewServer(node, store)
 	kvSrv.SetHTTPAddrs(cfg.HTTPAddrs)
 
@@ -248,8 +249,9 @@ func (c *Cluster) Crash(id string) error {
 	return nil
 }
 
-// Restart boots a crashed node. It reloads term/log from disk (if DataDir is set)
-// and the leader catches commitIndex up via AppendEntries.
+// Restart boots a crashed node. It reloads term/log/snapshot from disk
+// (if DataDir is set) and the leader catches it up via AppendEntries or
+// InstallSnapshot.
 func (c *Cluster) Restart(id string) error {
 	c.mu.Lock()
 	m, ok := c.members[id]
@@ -276,16 +278,18 @@ func (c *Cluster) mustExist(id string) error {
 
 // View is a JSON-friendly snapshot of one node for /cluster.
 type View struct {
-	ID          string `json:"id"`
-	State       string `json:"state"`
-	Term        int    `json:"term"`
-	LeaderID    string `json:"leader_id"`
-	LeaderHTTP  string `json:"leader_http,omitempty"`
-	CommitIndex int    `json:"commit_index"`
-	KVSize      int    `json:"kv_size"`
-	HTTP        string `json:"http"`
-	Isolated    bool   `json:"isolated"`
-	Crashed     bool   `json:"crashed"`
+	ID            string `json:"id"`
+	State         string `json:"state"`
+	Term          int    `json:"term"`
+	LeaderID      string `json:"leader_id"`
+	LeaderHTTP    string `json:"leader_http,omitempty"`
+	CommitIndex   int    `json:"commit_index"`
+	SnapshotIndex int    `json:"snapshot_index"`
+	LogLen        int    `json:"log_len"`
+	KVSize        int    `json:"kv_size"`
+	HTTP          string `json:"http"`
+	Isolated      bool   `json:"isolated"`
+	Crashed       bool   `json:"crashed"`
 }
 
 // Snapshot returns every node's current chaos + Raft status.
@@ -312,6 +316,8 @@ func (c *Cluster) Snapshot() []View {
 		v.LeaderID = st.LeaderID
 		v.LeaderHTTP = st.LeaderHTTP
 		v.CommitIndex = st.CommitIndex
+		v.SnapshotIndex = st.SnapshotIndex
+		v.LogLen = st.LogLen
 		v.KVSize = st.KVSize
 		out = append(out, v)
 	}

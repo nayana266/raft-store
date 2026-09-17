@@ -84,6 +84,20 @@ func (t *GRPCTransport) SendAppendEntries(to string, req *AppendEntriesRequest) 
 	return appendRespFromProto(resp), nil
 }
 
+func (t *GRPCTransport) SendInstallSnapshot(to string, req *InstallSnapshotRequest) (*InstallSnapshotResponse, error) {
+	c, err := t.client(to)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := c.InstallSnapshot(ctx, installReqToProto(req))
+	if err != nil {
+		return nil, err
+	}
+	return installRespFromProto(resp), nil
+}
+
 type raftGRPCServer struct {
 	pb.UnimplementedRaftServer
 	node *RaftNode
@@ -97,6 +111,11 @@ func (s *raftGRPCServer) RequestVote(ctx context.Context, req *pb.RequestVoteReq
 func (s *raftGRPCServer) AppendEntries(ctx context.Context, req *pb.AppendEntriesRequest) (*pb.AppendEntriesResponse, error) {
 	resp := s.node.HandleAppendEntries(appendReqFromProto(req))
 	return appendRespToProto(resp), nil
+}
+
+func (s *raftGRPCServer) InstallSnapshot(ctx context.Context, req *pb.InstallSnapshotRequest) (*pb.InstallSnapshotResponse, error) {
+	resp := s.node.HandleInstallSnapshot(installReqFromProto(req))
+	return installRespToProto(resp), nil
 }
 
 // RegisterRaftServer attaches this node's Raft handlers to a gRPC server.
@@ -184,4 +203,32 @@ func appendRespToProto(r *AppendEntriesResponse) *pb.AppendEntriesResponse {
 
 func appendRespFromProto(r *pb.AppendEntriesResponse) *AppendEntriesResponse {
 	return &AppendEntriesResponse{Term: int(r.Term), Success: r.Success}
+}
+
+func installReqToProto(r *InstallSnapshotRequest) *pb.InstallSnapshotRequest {
+	return &pb.InstallSnapshotRequest{
+		Term:              int64(r.Term),
+		LeaderId:          r.LeaderID,
+		LastIncludedIndex: int64(r.LastIncludedIndex),
+		LastIncludedTerm:  int64(r.LastIncludedTerm),
+		Data:              r.Data,
+	}
+}
+
+func installReqFromProto(r *pb.InstallSnapshotRequest) *InstallSnapshotRequest {
+	return &InstallSnapshotRequest{
+		Term:              int(r.Term),
+		LeaderID:          r.LeaderId,
+		LastIncludedIndex: int(r.LastIncludedIndex),
+		LastIncludedTerm:  int(r.LastIncludedTerm),
+		Data:              append([]byte(nil), r.Data...),
+	}
+}
+
+func installRespToProto(r *InstallSnapshotResponse) *pb.InstallSnapshotResponse {
+	return &pb.InstallSnapshotResponse{Term: int64(r.Term)}
+}
+
+func installRespFromProto(r *pb.InstallSnapshotResponse) *InstallSnapshotResponse {
+	return &InstallSnapshotResponse{Term: int(r.Term)}
 }

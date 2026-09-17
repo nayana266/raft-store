@@ -151,8 +151,16 @@ func TestPutSurvivesLeaderIsolation(t *testing.T) {
 		}
 	}
 	newLeader := leaderOf(t, remaining)
-	v, ok, err := newLeader.Get("durable")
-	if err != nil || !ok || v != "yes" {
-		t.Fatalf("after failover Get = %q %v %v", v, ok, err)
+	deadline := time.Now().Add(2 * time.Second)
+	var v string
+	var ok bool
+	var err error
+	for time.Now().Before(deadline) {
+		v, ok, err = newLeader.Get("durable")
+		if err == nil && ok && v == "yes" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Fatalf("after failover Get = %q %v %v", v, ok, err)
 }

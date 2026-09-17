@@ -1,6 +1,9 @@
 package kv
 
-import "sync"
+import (
+	"encoding/json"
+	"sync"
+)
 
 // Store is an in-memory key-value map applied from committed Raft entries.
 type Store struct {
@@ -35,8 +38,8 @@ func (s *Store) Len() int {
 	return len(s.data)
 }
 
-// Snapshot copies the current map.
-func (s *Store) Snapshot() map[string]string {
+// Clone copies the current map.
+func (s *Store) Clone() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make(map[string]string, len(s.data))
@@ -44,4 +47,36 @@ func (s *Store) Snapshot() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// Replace overwrites the map. Used when installing a Raft snapshot.
+func (s *Store) Replace(m map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = make(map[string]string, len(m))
+	for k, v := range m {
+		s.data[k] = v
+	}
+}
+
+// Snapshot serializes the map for Raft log compaction.
+func (s *Store) Snapshot() ([]byte, error) {
+	return json.Marshal(s.Clone())
+}
+
+// Restore replaces the map from a Snapshot() blob.
+func (s *Store) Restore(data []byte) error {
+	var m map[string]string
+	if len(data) == 0 {
+		s.Replace(map[string]string{})
+		return nil
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+	if m == nil {
+		m = map[string]string{}
+	}
+	s.Replace(m)
+	return nil
 }

@@ -96,13 +96,14 @@ func runNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]stri
 }
 
 func startNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, dataDir string, logger *slog.Logger) (*raft.RaftNode, *kv.Server, *grpc.Server, *http.Server, error) {
+	store := kv.NewStore()
 	cfg := raft.DefaultConfig(id, peerAddrs)
 	cfg.Logger = logger
+	cfg.Snapshotter = store
 	if dataDir != "" {
 		cfg.Storage = raft.NewFileStorage(dataDir)
 	}
 	node := raft.NewNode(cfg)
-	store := kv.NewStore()
 	kvSrv := kv.NewServer(node, store)
 	kvSrv.SetHTTPAddrs(httpAddrs)
 

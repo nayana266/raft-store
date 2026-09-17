@@ -43,17 +43,19 @@ func (k *kvGRPCServer) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResp
 func (k *kvGRPCServer) Status(ctx context.Context, req *pb.StatusRequest) (*pb.StatusResponse, error) {
 	st := k.srv.Status()
 	return &pb.StatusResponse{
-		Id:           st.ID,
-		State:        st.State,
-		Term:         int64(st.Term),
-		LeaderId:     st.LeaderID,
-		LeaderAddr:   st.LeaderAddr,
-		VotedFor:     st.VotedFor,
-		CommitIndex:  int64(st.CommitIndex),
-		LastApplied:  int64(st.LastApplied),
-		LastLogIndex: int64(st.LastLogIndex),
-		KvSize:       int64(st.KVSize),
-		Peers:        st.Peers,
+		Id:            st.ID,
+		State:         st.State,
+		Term:          int64(st.Term),
+		LeaderId:      st.LeaderID,
+		LeaderAddr:    st.LeaderAddr,
+		VotedFor:      st.VotedFor,
+		CommitIndex:   int64(st.CommitIndex),
+		LastApplied:   int64(st.LastApplied),
+		LastLogIndex:  int64(st.LastLogIndex),
+		SnapshotIndex: int64(st.SnapshotIndex),
+		LogLen:        int64(st.LogLen),
+		KvSize:        int64(st.KVSize),
+		Peers:         st.Peers,
 	}, nil
 }
 

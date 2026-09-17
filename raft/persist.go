@@ -7,18 +7,23 @@ import (
 	"path/filepath"
 )
 
-// Storage is durable Raft state: currentTerm, votedFor, and the log.
-// commitIndex is intentionally not stored; it is recovered after a new
-// leader commits a current-term entry (the leadership no-op).
-type Storage interface {
-	Save(currentTerm int, votedFor string, log []LogEntry) error
-	Load() (currentTerm int, votedFor string, log []LogEntry, err error)
-}
-
-type durableState struct {
+// DurableState is what a node writes to disk: current term, vote, log, and
+// the latest snapshot (if any). commitIndex is not stored; a new leader
+// recovers it by committing a current-term no-op.
+//
+// After compaction the log no longer starts at index 0. log[0] is a dummy
+// whose Index/Term are lastIncludedIndex/lastIncludedTerm of the snapshot.
+type DurableState struct {
 	CurrentTerm int        `json:"current_term"`
 	VotedFor    string     `json:"voted_for"`
 	Log         []LogEntry `json:"log"`
+	Snapshot    []byte     `json:"snapshot,omitempty"`
+}
+
+// Storage is durable Raft state.
+type Storage interface {
+	Save(DurableState) error
+	Load() (DurableState, error)
 }
 
 // FileStorage writes state.json atomically into a directory.
@@ -36,15 +41,11 @@ func (s *FileStorage) path() string {
 }
 
 // Save fsyncs a temp file, then renames it over state.json.
-func (s *FileStorage) Save(currentTerm int, votedFor string, log []LogEntry) error {
+func (s *FileStorage) Save(st DurableState) error {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return err
 	}
-	body, err := json.Marshal(durableState{
-		CurrentTerm: currentTerm,
-		VotedFor:    votedFor,
-		Log:         log,
-	})
+	body, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}
@@ -75,26 +76,32 @@ func (s *FileStorage) Save(currentTerm int, votedFor string, log []LogEntry) err
 }
 
 // Load reads state.json. A missing file is not an error (fresh node).
-func (s *FileStorage) Load() (int, string, []LogEntry, error) {
+func (s *FileStorage) Load() (DurableState, error) {
 	body, err := os.ReadFile(s.path())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, "", nil, nil
+			return DurableState{}, nil
 		}
-		return 0, "", nil, err
+		return DurableState{}, err
 	}
-	var st durableState
+	var st DurableState
 	if err := json.Unmarshal(body, &st); err != nil {
-		return 0, "", nil, fmt.Errorf("corrupt raft state: %w", err)
+		return DurableState{}, fmt.Errorf("corrupt raft state: %w", err)
 	}
-	return st.CurrentTerm, st.VotedFor, st.Log, nil
+	return st, nil
 }
 
 func (n *RaftNode) persistLocked() {
 	if n.storage == nil {
 		return
 	}
-	if err := n.storage.Save(n.currentTerm, n.votedFor, n.log); err != nil {
+	st := DurableState{
+		CurrentTerm: n.currentTerm,
+		VotedFor:    n.votedFor,
+		Log:         n.log,
+		Snapshot:    n.snapshot,
+	}
+	if err := n.storage.Save(st); err != nil {
 		n.logger.Error("persist failed", "err", err)
 	}
 }

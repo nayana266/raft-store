@@ -17,3 +17,29 @@ func TestStorePutGet(t *testing.T) {
 		t.Fatalf("len = %d, want 1", s.Len())
 	}
 }
+
+func TestStoreSnapshotRestore(t *testing.T) {
+	s := NewStore()
+	s.Put("color", "blue")
+	s.Put("city", "paris")
+	blob, err := s.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2 := NewStore()
+	if err := s2.Restore(blob); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := s2.Get("color"); !ok || v != "blue" {
+		t.Fatalf("color = %q %v", v, ok)
+	}
+	if s2.Len() != 2 {
+		t.Fatalf("len = %d", s2.Len())
+	}
+	if err := s2.Restore(nil); err != nil {
+		t.Fatal(err)
+	}
+	if s2.Len() != 0 {
+		t.Fatalf("restore empty should clear, len=%d", s2.Len())
+	}
+}

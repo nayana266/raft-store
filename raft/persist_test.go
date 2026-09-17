@@ -15,29 +15,48 @@ func TestFileStorageRoundTrip(t *testing.T) {
 		{Term: 0, Index: 0},
 		{Term: 1, Index: 1, Command: []byte("hello")},
 	}
-	if err := s.Save(3, "n2", log); err != nil {
+	if err := s.Save(DurableState{CurrentTerm: 3, VotedFor: "n2", Log: log, Snapshot: []byte("snap")}); err != nil {
 		t.Fatal(err)
 	}
-	term, voted, got, err := s.Load()
+	st, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if term != 3 || voted != "n2" {
-		t.Fatalf("term=%d voted=%q", term, voted)
+	if st.CurrentTerm != 3 || st.VotedFor != "n2" {
+		t.Fatalf("term=%d voted=%q", st.CurrentTerm, st.VotedFor)
 	}
-	if len(got) != 2 || !bytes.Equal(got[1].Command, []byte("hello")) {
-		t.Fatalf("log = %+v", got)
+	if len(st.Log) != 2 || !bytes.Equal(st.Log[1].Command, []byte("hello")) {
+		t.Fatalf("log = %+v", st.Log)
+	}
+	if !bytes.Equal(st.Snapshot, []byte("snap")) {
+		t.Fatalf("snapshot = %q", st.Snapshot)
 	}
 }
 
 func TestFileStorageMissingFileIsEmpty(t *testing.T) {
 	s := NewFileStorage(t.TempDir())
-	term, voted, log, err := s.Load()
+	st, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if term != 0 || voted != "" || log != nil {
-		t.Fatalf("got term=%d voted=%q log=%v", term, voted, log)
+	if st.CurrentTerm != 0 || st.VotedFor != "" || st.Log != nil || st.Snapshot != nil {
+		t.Fatalf("got %+v", st)
+	}
+}
+
+func TestFileStorageOldStateWithoutSnapshotStillLoads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	body := []byte(`{"current_term":2,"voted_for":"n1","log":[{"Term":0,"Index":0},{"Term":1,"Index":1,"Command":"YQ=="}]}`)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := NewFileStorage(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.CurrentTerm != 2 || st.VotedFor != "n1" || len(st.Log) != 2 || st.Snapshot != nil {
+		t.Fatalf("got %+v", st)
 	}
 }
 

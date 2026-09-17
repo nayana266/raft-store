@@ -70,6 +70,8 @@ type Config struct {
 	HeartbeatInterval  time.Duration
 	Logger             *slog.Logger
 	Storage            Storage
+	Snapshotter        Snapshotter
+	SnapshotThreshold  int // compact after this many applied entries past the last snapshot; 0 disables
 }
 
 // DefaultConfig returns paper-like timeouts (150–300 ms election, 50 ms heartbeat).
@@ -80,6 +82,7 @@ func DefaultConfig(id string, peerAddrs map[string]string) Config {
 		ElectionTimeoutMin: 150 * time.Millisecond,
 		ElectionTimeoutMax: 300 * time.Millisecond,
 		HeartbeatInterval:  50 * time.Millisecond,
+		SnapshotThreshold:  32,
 	}
 }
 
@@ -87,14 +90,17 @@ func DefaultConfig(id string, peerAddrs map[string]string) Config {
 type RaftNode struct {
 	mu sync.Mutex
 
-	id        string
-	peerAddrs map[string]string
-	peerIDs   []string
-	transport Transport
-	apply     ApplyFunc
-	storage   Storage
-	logger    *slog.Logger
-	rng       *rand.Rand
+	id                string
+	peerAddrs         map[string]string
+	peerIDs           []string
+	transport         Transport
+	apply             ApplyFunc
+	storage           Storage
+	snapshotter       Snapshotter
+	snapshotThreshold int
+	snapshot          []byte
+	logger            *slog.Logger
+	rng               *rand.Rand
 
 	electionTimeoutMin time.Duration
 	electionTimeoutMax time.Duration
@@ -167,14 +173,25 @@ func NewNode(cfg Config) *RaftNode {
 		stopCh:             make(chan struct{}),
 	}
 	n.storage = cfg.Storage
+	n.snapshotter = cfg.Snapshotter
+	n.snapshotThreshold = cfg.SnapshotThreshold
 	if n.storage != nil {
-		term, voted, lg, err := n.storage.Load()
+		st, err := n.storage.Load()
 		if err != nil {
 			logger.Error("load raft state", "node", cfg.ID, "err", err)
-		} else if len(lg) > 0 {
-			n.currentTerm = term
-			n.votedFor = voted
-			n.log = lg
+		} else if st.CurrentTerm != 0 || st.VotedFor != "" || len(st.Log) > 0 || len(st.Snapshot) > 0 {
+			n.currentTerm = st.CurrentTerm
+			n.votedFor = st.VotedFor
+			if len(st.Log) > 0 {
+				n.log = st.Log
+			}
+			n.snapshot = append([]byte(nil), st.Snapshot...)
+			if len(n.snapshot) > 0 && len(n.log) > 0 {
+				snapIdx := n.log[0].Index
+				n.lastApplied = snapIdx
+				n.commitIndex = snapIdx
+			}
+			n.restoreSnapshotLocked()
 		}
 	}
 	return n

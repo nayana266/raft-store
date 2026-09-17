@@ -40,6 +40,7 @@ type AppendEntriesResponse struct {
 type Transport interface {
 	SendRequestVote(to string, req *RequestVoteRequest) (*RequestVoteResponse, error)
 	SendAppendEntries(to string, req *AppendEntriesRequest) (*AppendEntriesResponse, error)
+	SendInstallSnapshot(to string, req *InstallSnapshotRequest) (*InstallSnapshotResponse, error)
 }
 
 // MemoryNetwork is an in-process transport used by unit and cluster tests.
@@ -113,10 +114,22 @@ func (t *memoryTransport) SendAppendEntries(to string, req *AppendEntriesRequest
 	return peer.HandleAppendEntries(req), nil
 }
 
+func (t *memoryTransport) SendInstallSnapshot(to string, req *InstallSnapshotRequest) (*InstallSnapshotResponse, error) {
+	t.net.mu.Lock()
+	ok := t.net.reachable(t.from, to)
+	peer := t.net.nodes[to]
+	t.net.mu.Unlock()
+	if !ok || peer == nil {
+		return nil, ErrUnreachable
+	}
+	return peer.HandleInstallSnapshot(req), nil
+}
+
 // stubTransport is a programmable transport for election unit tests.
 type stubTransport struct {
-	requestVote   func(to string, req *RequestVoteRequest) (*RequestVoteResponse, error)
-	appendEntries func(to string, req *AppendEntriesRequest) (*AppendEntriesResponse, error)
+	requestVote     func(to string, req *RequestVoteRequest) (*RequestVoteResponse, error)
+	appendEntries   func(to string, req *AppendEntriesRequest) (*AppendEntriesResponse, error)
+	installSnapshot func(to string, req *InstallSnapshotRequest) (*InstallSnapshotResponse, error)
 }
 
 func (s *stubTransport) SendRequestVote(to string, req *RequestVoteRequest) (*RequestVoteResponse, error) {
@@ -131,4 +144,11 @@ func (s *stubTransport) SendAppendEntries(to string, req *AppendEntriesRequest) 
 		return nil, ErrUnreachable
 	}
 	return s.appendEntries(to, req)
+}
+
+func (s *stubTransport) SendInstallSnapshot(to string, req *InstallSnapshotRequest) (*InstallSnapshotResponse, error) {
+	if s.installSnapshot == nil {
+		return nil, ErrUnreachable
+	}
+	return s.installSnapshot(to, req)
 }

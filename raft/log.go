@@ -8,6 +8,37 @@ func (n *RaftNode) lastLogTermLocked() int {
 	return n.log[len(n.log)-1].Term
 }
 
+// lastIncludedIndexLocked is the snapshot's last included raft index (log[0]).
+func (n *RaftNode) lastIncludedIndexLocked() int {
+	return n.log[0].Index
+}
+
+func (n *RaftNode) lastIncludedTermLocked() int {
+	return n.log[0].Term
+}
+
+// sliceIndexLocked maps a raft log index onto n.log. -1 means the index was
+// compacted away; >= len(n.log) means it has not been appended yet.
+func (n *RaftNode) sliceIndexLocked(raftIndex int) int {
+	return raftIndex - n.log[0].Index
+}
+
+func (n *RaftNode) entryAtLocked(raftIndex int) (LogEntry, bool) {
+	si := n.sliceIndexLocked(raftIndex)
+	if si < 0 || si >= len(n.log) {
+		return LogEntry{}, false
+	}
+	return n.log[si], true
+}
+
+func (n *RaftNode) termAtLocked(raftIndex int) (int, bool) {
+	e, ok := n.entryAtLocked(raftIndex)
+	if !ok {
+		return 0, false
+	}
+	return e.Term, true
+}
+
 func (n *RaftNode) broadcastAppendEntriesLocked() {
 	if n.transport == nil {
 		return
@@ -37,6 +68,39 @@ func (n *RaftNode) replicateTo(peer string) {
 			n.mu.Unlock()
 			return
 		}
+		if n.shouldInstallSnapshotLocked(peer) {
+			req := n.installSnapshotRequestLocked()
+			term := n.currentTerm
+			n.mu.Unlock()
+
+			resp, err := n.transport.SendInstallSnapshot(peer, req)
+			if err != nil {
+				return
+			}
+
+			n.mu.Lock()
+			if n.state != Leader || n.currentTerm != term {
+				n.mu.Unlock()
+				return
+			}
+			if resp.Term > n.currentTerm {
+				n.becomeFollowerLocked(resp.Term, "")
+				n.resetElectionTimerLocked()
+				n.mu.Unlock()
+				return
+			}
+			n.matchIndex[peer] = req.LastIncludedIndex
+			n.nextIndex[peer] = req.LastIncludedIndex + 1
+			n.advanceCommitLocked()
+			n.applyCommittedLocked()
+			more := n.lastLogIndexLocked() > n.matchIndex[peer]
+			n.mu.Unlock()
+			if more {
+				continue
+			}
+			return
+		}
+
 		req, term, ok := n.makeAppendRequestLocked(peer)
 		n.mu.Unlock()
 		if !ok {
@@ -71,30 +135,52 @@ func (n *RaftNode) replicateTo(peer string) {
 			n.mu.Unlock()
 			return
 		}
-		if n.nextIndex[peer] > 1 {
+		snap := n.lastIncludedIndexLocked()
+		if n.nextIndex[peer] > snap+1 {
+			n.nextIndex[peer]--
+		} else if snap > 0 {
+			n.nextIndex[peer] = snap
+		} else if n.nextIndex[peer] > 1 {
 			n.nextIndex[peer]--
 		}
 		n.mu.Unlock()
 	}
 }
 
+func (n *RaftNode) shouldInstallSnapshotLocked(peer string) bool {
+	snap := n.lastIncludedIndexLocked()
+	return snap > 0 && n.nextIndex[peer] <= snap
+}
+
 func (n *RaftNode) makeAppendRequestLocked(peer string) (*AppendEntriesRequest, int, bool) {
 	next := n.nextIndex[peer]
-	if next < 1 {
-		next = 1
-		n.nextIndex[peer] = 1
+	snap := n.lastIncludedIndexLocked()
+	if next <= snap {
+		return nil, n.currentTerm, false
 	}
-	if next-1 >= len(n.log) {
-		next = len(n.log)
+	last := n.lastLogIndexLocked()
+	if next > last+1 {
+		next = last + 1
 		n.nextIndex[peer] = next
 	}
 	prevIndex := next - 1
-	entries := cloneEntries(n.log[next:])
+	prevTerm, ok := n.termAtLocked(prevIndex)
+	if !ok {
+		return nil, n.currentTerm, false
+	}
+	start := n.sliceIndexLocked(next)
+	if start < 1 {
+		start = 1
+	}
+	if start > len(n.log) {
+		start = len(n.log)
+	}
+	entries := cloneEntries(n.log[start:])
 	return &AppendEntriesRequest{
 		Term:         n.currentTerm,
 		LeaderID:     n.id,
 		PrevLogIndex: prevIndex,
-		PrevLogTerm:  n.log[prevIndex].Term,
+		PrevLogTerm:  prevTerm,
 		Entries:      entries,
 		LeaderCommit: n.commitIndex,
 	}, n.currentTerm, true
@@ -119,19 +205,28 @@ func (n *RaftNode) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntries
 	n.resetElectionTimerLocked()
 	resp.Term = n.currentTerm
 
-	if req.PrevLogIndex >= len(n.log) {
+	if req.PrevLogIndex < n.lastIncludedIndexLocked() {
 		return resp
 	}
-	if n.log[req.PrevLogIndex].Term != req.PrevLogTerm {
+	prev, ok := n.entryAtLocked(req.PrevLogIndex)
+	if !ok {
+		return resp
+	}
+	if prev.Term != req.PrevLogTerm {
 		return resp
 	}
 
 	logDirty := false
 	for i, e := range req.Entries {
 		idx := req.PrevLogIndex + 1 + i
-		if idx < len(n.log) {
-			if n.log[idx].Term != e.Term {
-				n.log = n.log[:idx]
+		existing, exists := n.entryAtLocked(idx)
+		if exists {
+			if existing.Term != e.Term {
+				si := n.sliceIndexLocked(idx)
+				if si < 1 {
+					si = 1
+				}
+				n.log = n.log[:si]
 				n.appendEntriesLocked(req.Entries[i:], idx)
 				logDirty = true
 				break
@@ -175,7 +270,8 @@ func (n *RaftNode) appendEntriesLocked(entries []LogEntry, startIndex int) {
 func (n *RaftNode) advanceCommitLocked() {
 	last := n.lastLogIndexLocked()
 	for idx := last; idx > n.commitIndex; idx-- {
-		if n.log[idx].Term != n.currentTerm {
+		term, ok := n.termAtLocked(idx)
+		if !ok || term != n.currentTerm {
 			continue
 		}
 		count := 0
@@ -193,13 +289,15 @@ func (n *RaftNode) advanceCommitLocked() {
 
 func (n *RaftNode) applyCommittedLocked() {
 	for n.lastApplied < n.commitIndex {
-		n.lastApplied++
-		msg := ApplyMsg{
-			Index:   n.lastApplied,
-			Command: n.log[n.lastApplied].Command,
+		next := n.lastApplied + 1
+		e, ok := n.entryAtLocked(next)
+		if !ok {
+			break
 		}
+		n.lastApplied = next
 		if n.apply != nil {
-			n.apply(msg)
+			n.apply(ApplyMsg{Index: next, Command: e.Command})
 		}
 	}
+	n.maybeCompactLocked()
 }

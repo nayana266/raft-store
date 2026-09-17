@@ -133,6 +133,13 @@ func (t *FilterTransport) SendAppendEntries(to string, req *AppendEntriesRequest
 	return t.inner.SendAppendEntries(to, req)
 }
 
+func (t *FilterTransport) SendInstallSnapshot(to string, req *InstallSnapshotRequest) (*InstallSnapshotResponse, error) {
+	if t.faults != nil && !t.faults.Allow(t.from, to) {
+		return nil, ErrUnreachable
+	}
+	return t.inner.SendInstallSnapshot(to, req)
+}
+
 // Close closes the inner transport when it supports it.
 func (t *FilterTransport) Close() {
 	if c, ok := t.inner.(interface{ Close() }); ok {
