@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"raftkv/cluster"
 	"raftkv/kv"
 	"raftkv/raft"
 )
@@ -121,42 +122,30 @@ func startNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]st
 }
 
 func runDevCluster(logger *slog.Logger) error {
-	ids := []string{"n1", "n2", "n3"}
-	peerAddrs := map[string]string{
-		"n1": "127.0.0.1:19101",
-		"n2": "127.0.0.1:19102",
-		"n3": "127.0.0.1:19103",
-	}
-	httpAddrs := map[string]string{
-		"n1": "127.0.0.1:18101",
-		"n2": "127.0.0.1:18102",
-		"n3": "127.0.0.1:18103",
+	c := cluster.New(cluster.DevConfig(), logger, httpMux)
+	if err := c.Start(); err != nil {
+		return err
 	}
 
-	type running struct {
-		node    *raft.RaftNode
-		httpSrv *http.Server
-		gs      *grpc.Server
+	controlAddr := "127.0.0.1:18280"
+	control := &http.Server{
+		Addr:              controlAddr,
+		Handler:           cluster.Handler(c),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
-	var nodes []running
-	for _, id := range ids {
-		node, _, gs, httpSrv, err := startNode(id, peerAddrs[id], httpAddrs[id], peerAddrs, httpAddrs, logger)
-		if err != nil {
-			return err
+	go func() {
+		if err := control.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("chaos control", "err", err)
 		}
-		nodes = append(nodes, running{node: node, httpSrv: httpSrv, gs: gs})
-		logger.Info("dev node started", "id", id, "raft", peerAddrs[id], "http", httpAddrs[id])
-	}
+	}()
 
 	logger.Info("dev cluster ready",
-		"hint", "curl -s http://127.0.0.1:18101/status ; curl -s -X PUT http://127.0.0.1:18101/kv/color -d blue")
+		"kv", "curl -s http://127.0.0.1:18101/status",
+		"chaos", "curl -s http://127.0.0.1:18280/cluster")
 
 	waitForSignal()
-	for _, n := range nodes {
-		_ = n.httpSrv.Close()
-		n.gs.GracefulStop()
-		n.node.Stop()
-	}
+	_ = control.Close()
+	c.Stop()
 	return nil
 }
 

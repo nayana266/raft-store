@@ -46,18 +46,16 @@ type Transport interface {
 // It can isolate a node (simulating a crash or full partition) without any
 // real sockets.
 type MemoryNetwork struct {
-	mu       sync.Mutex
-	nodes    map[string]*RaftNode
-	isolated map[string]bool
-	blocked  map[string]map[string]bool // from -> to
+	mu     sync.Mutex
+	nodes  map[string]*RaftNode
+	Faults *Faults
 }
 
 // NewMemoryNetwork creates an empty in-process cluster network.
 func NewMemoryNetwork() *MemoryNetwork {
 	return &MemoryNetwork{
-		nodes:    make(map[string]*RaftNode),
-		isolated: make(map[string]bool),
-		blocked:  make(map[string]map[string]bool),
+		nodes:  make(map[string]*RaftNode),
+		Faults: NewFaults(),
 	}
 }
 
@@ -70,41 +68,16 @@ func (net *MemoryNetwork) Add(n *RaftNode) {
 }
 
 // Isolate drops all RPCs to and from id (crash / hard partition).
-func (net *MemoryNetwork) Isolate(id string) {
-	net.mu.Lock()
-	defer net.mu.Unlock()
-	net.isolated[id] = true
-}
+func (net *MemoryNetwork) Isolate(id string) { net.Faults.Isolate(id) }
 
 // Heal restores traffic to and from id.
-func (net *MemoryNetwork) Heal(id string) {
-	net.mu.Lock()
-	defer net.mu.Unlock()
-	delete(net.isolated, id)
-}
+func (net *MemoryNetwork) Heal(id string) { net.Faults.Heal(id) }
 
 // Disconnect blocks RPCs in both directions between a and b.
-func (net *MemoryNetwork) Disconnect(a, b string) {
-	net.mu.Lock()
-	defer net.mu.Unlock()
-	if net.blocked[a] == nil {
-		net.blocked[a] = make(map[string]bool)
-	}
-	if net.blocked[b] == nil {
-		net.blocked[b] = make(map[string]bool)
-	}
-	net.blocked[a][b] = true
-	net.blocked[b][a] = true
-}
+func (net *MemoryNetwork) Disconnect(a, b string) { net.Faults.Disconnect(a, b) }
 
 func (net *MemoryNetwork) reachable(from, to string) bool {
-	if net.isolated[from] || net.isolated[to] {
-		return false
-	}
-	if net.blocked[from] != nil && net.blocked[from][to] {
-		return false
-	}
-	return true
+	return net.Faults.Allow(from, to)
 }
 
 func (net *MemoryNetwork) lookup(id string) *RaftNode {
