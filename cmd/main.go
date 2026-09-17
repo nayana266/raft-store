@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -174,7 +175,9 @@ func httpMux(srv *kv.Server) http.Handler {
 		key := r.PathValue("key")
 		v, found, err := srv.Get(key)
 		if err != nil {
-			writeErr(w, err)
+			if !forwardToLeader(w, r, srv, err, nil) {
+				writeErr(w, err)
+			}
 			return
 		}
 		if !found {
@@ -191,12 +194,57 @@ func httpMux(srv *kv.Server) http.Handler {
 			return
 		}
 		if err := srv.Put(key, string(body)); err != nil {
-			writeErr(w, err)
+			if !forwardToLeader(w, r, srv, err, body) {
+				writeErr(w, err)
+			}
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": key})
 	})
 	return mux
+}
+
+const raftForwardedHeader = "X-Raft-Forwarded"
+
+// forwardToLeader proxies a follower Get/Put to leader_http so curl on any
+// node works. /status stays local. Returns false if it did not handle err.
+func forwardToLeader(w http.ResponseWriter, r *http.Request, srv *kv.Server, err error, body []byte) bool {
+	var nl *kv.NotLeaderError
+	if !errors.As(err, &nl) || nl.LeaderHTTP == "" {
+		return false
+	}
+	if r.Header.Get(raftForwardedHeader) != "" {
+		return false
+	}
+	if own := srv.OwnHTTP(); own != "" && own == nl.LeaderHTTP {
+		return false
+	}
+	url := "http://" + nl.LeaderHTTP + r.URL.Path
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body)
+	}
+	req, reqErr := http.NewRequestWithContext(r.Context(), r.Method, url, reqBody)
+	if reqErr != nil {
+		return false
+	}
+	req.Header.Set(raftForwardedHeader, "1")
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		req.Header.Set("Content-Type", ct)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, doErr := client.Do(req)
+	if doErr != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	outCT := resp.Header.Get("Content-Type")
+	if outCT != "" {
+		w.Header().Set("Content-Type", outCT)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+	return true
 }
 
 func writeErr(w http.ResponseWriter, err error) {

@@ -61,12 +61,14 @@ Find the leader (any node answers `/status`):
 curl -s http://127.0.0.1:18101/status
 ```
 
-Write and read on the leader. If you hit a follower you get `503` with `leader_id` and `leader_http`.
+Write and read on any node: a follower forwards Get/Put to the current leader. `/status` is always local (that process’s view), so `18101` can say `"state":"follower"` and still accept the Put.
 
 ```bash
 curl -s -X PUT http://127.0.0.1:18101/kv/color -d blue
 curl -s http://127.0.0.1:18101/kv/color
 ```
+
+If forwarding is not in the binary you are running, a follower answers `503` with `leader_http`. Retry the same path on that address (for `-dev`, `n3` is `http://127.0.0.1:18103`).
 
 Kill the leader process, wait a moment, and `/status` on a survivor should show a new `leader_id`. The key you already put is still there.
 

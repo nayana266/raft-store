@@ -175,6 +175,11 @@ func (s *Server) httpAddr(id string) string {
 	return s.httpAddrs[id]
 }
 
+// OwnHTTP is this node's advertised HTTP address, if SetHTTPAddrs was called.
+func (s *Server) OwnHTTP() string {
+	return s.httpAddr(s.raft.ID())
+}
+
 // Node returns the underlying Raft node.
 func (s *Server) Node() *raft.RaftNode { return s.raft }
 
