@@ -2,7 +2,7 @@
 
 A small distributed key-value store. Three (or more) Go processes form a cluster, elect a leader with Raft, and only acknowledge a write once a majority of nodes have it in their log.
 
-This phase covers leader election, log replication, and a Get/Put API. There is no disk persistence, snapshotting, or membership change yet — the log lives in memory.
+This phase covers leader election, log replication, a Get/Put API, and a chaos control plane (isolate / crash / heal a node while the cluster is running). There is no disk persistence, snapshotting, or membership change yet — the log lives in memory.
 
 ## How it works
 
@@ -19,8 +19,9 @@ Inter-node RPCs (`RequestVote`, `AppendEntries`) and the KV service travel over 
 ## Layout
 
 ```
-raft/     RaftNode, election, log matching, gRPC transport
+raft/     RaftNode, election, log matching, gRPC transport, fault injector
 kv/       in-memory store and Get/Put (leader-only, with redirect)
+cluster/  -dev cluster + chaos HTTP API (crash, isolate, partition)
 proto/    gRPC definitions
 cmd/      process entrypoint
 ```
@@ -66,6 +67,47 @@ curl -s http://127.0.0.1:18101/kv/color
 
 Kill the leader process, wait a moment, and `/status` on a survivor should show a new `leader_id`. The key you already put is still there.
 
+## Break it on purpose (`-dev` only)
+
+`go run ./cmd -dev` also starts a **chaos control plane** on port `18280`. This drops Raft RPCs or kills a node without you needing three terminals.
+
+See the whole cluster:
+
+```bash
+curl -s http://127.0.0.1:18280/cluster
+```
+
+Write a key, then crash the leader and read it from whoever wins next:
+
+```bash
+# 1. find the leader
+curl -s http://127.0.0.1:18280/cluster
+
+# 2. put on that leader's HTTP port (example: n2 → 18102)
+curl -s -X PUT http://127.0.0.1:18102/kv/color -d blue
+
+# 3. kill the leader process
+curl -s -X POST http://127.0.0.1:18280/chaos/crash/n2
+
+# 4. wait a beat, then ask the survivors
+sleep 1
+curl -s http://127.0.0.1:18101/status
+curl -s http://127.0.0.1:18103/kv/color   # follow leader_http if this 503s
+```
+
+Other knobs:
+
+| Call | What it does |
+|---|---|
+| `POST /chaos/isolate/n2` | Unplug the network cable. Process stays up (zombie). |
+| `POST /chaos/heal/n2` | Plug the cable back in. |
+| `POST /chaos/crash/n2` | Kill Raft + HTTP + gRPC for that node. |
+| `POST /chaos/restart/n2` | Boot it again with an empty memory log; leader catches it up. |
+| `POST /chaos/partition/n1/n2` | Cut only the n1↔n2 link. |
+| `POST /chaos/heal-all` | Clear isolations and pairwise cuts. |
+
+Isolate vs crash: isolate keeps HTTP alive, so a partitioned leader may still accept a Put and then **time out** (no majority). Crash makes `curl` to that port fail with connection refused.
+
 ## Tests
 
 Election state transitions are unit-tested without sockets. Replication and failover use an in-memory network that can isolate a node:
@@ -77,4 +119,4 @@ go test ./... -race
 
 ## Not in this phase
 
-Disk persistence, log compaction / snapshots, dynamic membership, and a dedicated chaos harness. The in-memory network in `raft/rpc.go` (`Isolate`, `Heal`, `Disconnect`) is the hook those tests will use later.
+Disk persistence, log compaction / snapshots, and dynamic membership. Chaos (isolate / crash / partition) is available on the `-dev` control plane at `http://127.0.0.1:18280`.
