@@ -126,18 +126,24 @@ func (n *RaftNode) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntries
 		return resp
 	}
 
+	logDirty := false
 	for i, e := range req.Entries {
 		idx := req.PrevLogIndex + 1 + i
 		if idx < len(n.log) {
 			if n.log[idx].Term != e.Term {
 				n.log = n.log[:idx]
 				n.appendEntriesLocked(req.Entries[i:], idx)
+				logDirty = true
 				break
 			}
 			continue
 		}
 		n.appendEntriesLocked(req.Entries[i:], idx)
+		logDirty = true
 		break
+	}
+	if logDirty {
+		n.persistLocked()
 	}
 
 	if req.LeaderCommit > n.commitIndex {

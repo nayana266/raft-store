@@ -69,6 +69,7 @@ type Config struct {
 	ElectionTimeoutMax time.Duration
 	HeartbeatInterval  time.Duration
 	Logger             *slog.Logger
+	Storage            Storage
 }
 
 // DefaultConfig returns paper-like timeouts (150–300 ms election, 50 ms heartbeat).
@@ -91,6 +92,7 @@ type RaftNode struct {
 	peerIDs   []string
 	transport Transport
 	apply     ApplyFunc
+	storage   Storage
 	logger    *slog.Logger
 	rng       *rand.Rand
 
@@ -163,6 +165,17 @@ func NewNode(cfg Config) *RaftNode {
 		replicating:        make(map[string]bool),
 		votesReceived:      make(map[string]bool),
 		stopCh:             make(chan struct{}),
+	}
+	n.storage = cfg.Storage
+	if n.storage != nil {
+		term, voted, lg, err := n.storage.Load()
+		if err != nil {
+			logger.Error("load raft state", "node", cfg.ID, "err", err)
+		} else if len(lg) > 0 {
+			n.currentTerm = term
+			n.votedFor = voted
+			n.log = lg
+		}
 	}
 	return n
 }
@@ -243,6 +256,7 @@ func (n *RaftNode) becomeFollowerLocked(term int, leaderID string) {
 	if term > n.currentTerm {
 		n.currentTerm = term
 		n.votedFor = ""
+		n.persistLocked()
 	}
 	n.state = Follower
 	n.leaderID = leaderID
@@ -268,6 +282,9 @@ func (n *RaftNode) becomeLeaderLocked() {
 	n.nextIndex[n.id] = noop.Index + 1
 	n.nextHeartbeat = time.Time{}
 
+	n.persistLocked()
+	n.advanceCommitLocked()
+	n.applyCommittedLocked()
 	n.logger.Info("became leader", "term", n.currentTerm, "log_index", noop.Index)
 	n.broadcastAppendEntriesLocked()
 }
@@ -297,8 +314,11 @@ func (n *RaftNode) Propose(cmd []byte) (index int, term int, err error) {
 		Command: append([]byte(nil), cmd...),
 	}
 	n.log = append(n.log, entry)
+	n.persistLocked()
 	n.matchIndex[n.id] = index
 	n.nextIndex[n.id] = index + 1
+	n.advanceCommitLocked()
+	n.applyCommittedLocked()
 	n.broadcastAppendEntriesLocked()
 	return index, term, nil
 }

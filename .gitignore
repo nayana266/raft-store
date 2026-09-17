@@ -1,6 +1,7 @@
 /bin/
 /raftkv
 /raft-store
+/data
 *.test
 *.out
 .DS_Store

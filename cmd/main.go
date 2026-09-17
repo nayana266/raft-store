@@ -29,6 +29,8 @@ func main() {
 		peers     = flag.String("peers", "", "cluster membership as id=host:port,id=host:port (must include self)")
 		httpPeers = flag.String("http-peers", "", "optional HTTP advertise map id=host:port,id=host:port for redirects")
 		dev       = flag.Bool("dev", false, "start a 3-node in-process cluster on ports 19101-19103 / 18101-18103")
+		data      = flag.String("data", "", "directory for this node's Raft log (default data/<id>)")
+		dataRoot  = flag.String("data-root", "data", "per-node data directories for -dev (data/n1, data/n2, data/n3)")
 	)
 	flag.Parse()
 
@@ -36,7 +38,9 @@ func main() {
 	slog.SetDefault(logger)
 
 	if *dev {
-		if err := runDevCluster(logger); err != nil {
+		cfg := cluster.DevConfig()
+		cfg.DataDir = *dataRoot
+		if err := runDevCluster(cfg, logger); err != nil {
 			logger.Error("dev cluster failed", "err", err)
 			os.Exit(1)
 		}
@@ -59,18 +63,21 @@ func main() {
 		httpAddrs[*id] = *httpAddr
 	}
 
-	if err := runNode(*id, *raftAddr, *httpAddr, peerAddrs, httpAddrs, logger); err != nil {
+	if err := runNode(*id, *raftAddr, *httpAddr, peerAddrs, httpAddrs, *data, logger); err != nil {
 		logger.Error("node failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func runNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, logger *slog.Logger) error {
-	node, _, gs, httpSrv, err := startNode(id, raftAddr, httpAddr, peerAddrs, httpAddrs, logger)
+func runNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, dataDir string, logger *slog.Logger) error {
+	if dataDir == "" {
+		dataDir = "data/" + id
+	}
+	node, _, gs, httpSrv, err := startNode(id, raftAddr, httpAddr, peerAddrs, httpAddrs, dataDir, logger)
 	if err != nil {
 		return err
 	}
-	logger.Info("node started", "id", id, "raft", raftAddr, "http", httpAddr, "peers", peerKeys(peerAddrs))
+	logger.Info("node started", "id", id, "raft", raftAddr, "http", httpAddr, "data", dataDir, "peers", peerKeys(peerAddrs))
 
 	waitForSignal()
 	logger.Info("shutting down", "id", id)
@@ -88,9 +95,12 @@ func runNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]stri
 	return nil
 }
 
-func startNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, logger *slog.Logger) (*raft.RaftNode, *kv.Server, *grpc.Server, *http.Server, error) {
+func startNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, dataDir string, logger *slog.Logger) (*raft.RaftNode, *kv.Server, *grpc.Server, *http.Server, error) {
 	cfg := raft.DefaultConfig(id, peerAddrs)
 	cfg.Logger = logger
+	if dataDir != "" {
+		cfg.Storage = raft.NewFileStorage(dataDir)
+	}
 	node := raft.NewNode(cfg)
 	store := kv.NewStore()
 	kvSrv := kv.NewServer(node, store)
@@ -121,8 +131,8 @@ func startNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]st
 	return node, kvSrv, gs, httpSrv, nil
 }
 
-func runDevCluster(logger *slog.Logger) error {
-	c := cluster.New(cluster.DevConfig(), logger, httpMux)
+func runDevCluster(cfg cluster.Config, logger *slog.Logger) error {
+	c := cluster.New(cfg, logger, httpMux)
 	if err := c.Start(); err != nil {
 		return err
 	}
@@ -141,7 +151,8 @@ func runDevCluster(logger *slog.Logger) error {
 
 	logger.Info("dev cluster ready",
 		"kv", "curl -s http://127.0.0.1:18101/status",
-		"chaos", "curl -s http://127.0.0.1:18280/cluster")
+		"chaos", "curl -s http://127.0.0.1:18280/cluster",
+		"data", cfg.DataDir)
 
 	waitForSignal()
 	_ = control.Close()
