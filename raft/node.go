@@ -45,9 +45,10 @@ var (
 
 // LogEntry is a single entry in the Raft log.
 type LogEntry struct {
-	Term    int
-	Index   int
-	Command []byte
+	Term    int               `json:"Term"`
+	Index   int               `json:"Index"`
+	Command []byte            `json:"Command,omitempty"`
+	Change  *MembershipChange `json:"Change,omitempty"`
 }
 
 // ApplyMsg is delivered to the state machine once an entry is committed.
@@ -71,7 +72,9 @@ type Config struct {
 	Logger             *slog.Logger
 	Storage            Storage
 	Snapshotter        Snapshotter
-	SnapshotThreshold  int // compact after this many applied entries past the last snapshot; 0 disables
+	SnapshotThreshold  int               // compact after this many applied entries past the last snapshot; 0 disables
+	HTTPAddrs          map[string]string // id -> HTTP advertise address (optional)
+	Join               bool              // do not campaign until a leader replicates membership
 }
 
 // DefaultConfig returns paper-like timeouts (150–300 ms election, 50 ms heartbeat).
@@ -92,7 +95,12 @@ type RaftNode struct {
 
 	id                string
 	peerAddrs         map[string]string
+	peerHTTP          map[string]string
 	peerIDs           []string
+	basePeers         map[string]string
+	baseHTTP          map[string]string
+	joining           bool
+	peerHook          PeerHook
 	transport         Transport
 	apply             ApplyFunc
 	storage           Storage
@@ -144,8 +152,10 @@ func NewNode(cfg Config) *RaftNode {
 		logger = slog.Default()
 	}
 
-	peerIDs := make([]string, 0, len(cfg.PeerAddrs))
-	for id := range cfg.PeerAddrs {
+	peerAddrs := cloneStringMap(cfg.PeerAddrs)
+	peerHTTP := cloneStringMap(cfg.HTTPAddrs)
+	peerIDs := make([]string, 0, len(peerAddrs))
+	for id := range peerAddrs {
 		peerIDs = append(peerIDs, id)
 	}
 	sort.Strings(peerIDs)
@@ -156,8 +166,12 @@ func NewNode(cfg Config) *RaftNode {
 
 	n := &RaftNode{
 		id:                 cfg.ID,
-		peerAddrs:          cfg.PeerAddrs,
+		peerAddrs:          peerAddrs,
+		peerHTTP:           peerHTTP,
 		peerIDs:            peerIDs,
+		basePeers:          cloneStringMap(peerAddrs),
+		baseHTTP:           cloneStringMap(peerHTTP),
+		joining:            cfg.Join,
 		logger:             logger.With("node", cfg.ID),
 		rng:                rand.New(rand.NewSource(seed)),
 		electionTimeoutMin: cfg.ElectionTimeoutMin,
@@ -179,19 +193,27 @@ func NewNode(cfg Config) *RaftNode {
 		st, err := n.storage.Load()
 		if err != nil {
 			logger.Error("load raft state", "node", cfg.ID, "err", err)
-		} else if st.CurrentTerm != 0 || st.VotedFor != "" || len(st.Log) > 0 || len(st.Snapshot) > 0 {
+		} else if st.CurrentTerm != 0 || st.VotedFor != "" || len(st.Log) > 0 || len(st.Snapshot) > 0 || len(st.SnapshotPeers) > 0 {
 			n.currentTerm = st.CurrentTerm
 			n.votedFor = st.VotedFor
 			if len(st.Log) > 0 {
 				n.log = st.Log
 			}
 			n.snapshot = append([]byte(nil), st.Snapshot...)
+			if len(st.SnapshotPeers) > 0 {
+				n.basePeers = cloneStringMap(st.SnapshotPeers)
+				n.baseHTTP = cloneStringMap(st.SnapshotHTTP)
+			}
 			if len(n.snapshot) > 0 && len(n.log) > 0 {
 				snapIdx := n.log[0].Index
 				n.lastApplied = snapIdx
 				n.commitIndex = snapIdx
 			}
 			n.restoreSnapshotLocked()
+			n.rebuildMembershipLocked()
+			if len(n.peerIDs) > 1 {
+				n.joining = false
+			}
 		}
 	}
 	return n
@@ -257,7 +279,7 @@ func (n *RaftNode) tick() {
 	now := time.Now()
 	switch n.state {
 	case Follower, Candidate:
-		if !now.Before(n.electionDeadline) {
+		if !n.joining && n.isVoterLocked() && !now.Before(n.electionDeadline) {
 			n.startElectionLocked()
 		}
 	case Leader:
@@ -445,6 +467,8 @@ func (n *RaftNode) LogSnapshot() []LogEntry {
 
 // PeerIDs returns the configured cluster membership, sorted.
 func (n *RaftNode) PeerIDs() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	out := make([]string, len(n.peerIDs))
 	copy(out, n.peerIDs)
 	return out
@@ -452,6 +476,8 @@ func (n *RaftNode) PeerIDs() []string {
 
 // PeerAddr returns the raft listen address for a peer.
 func (n *RaftNode) PeerAddr(id string) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	return n.peerAddrs[id]
 }
 
@@ -461,6 +487,12 @@ func cloneEntries(entries []LogEntry) []LogEntry {
 		out[i] = e
 		if e.Command != nil {
 			out[i].Command = append([]byte(nil), e.Command...)
+		}
+		if e.Change != nil {
+			ch := *e.Change
+			ch.Peers = cloneStringMap(e.Change.Peers)
+			ch.HTTPAddrs = cloneStringMap(e.Change.HTTPAddrs)
+			out[i].Change = &ch
 		}
 	}
 	return out

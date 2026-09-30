@@ -14,10 +14,12 @@ import (
 // After compaction the log no longer starts at index 0. log[0] is a dummy
 // whose Index/Term are lastIncludedIndex/lastIncludedTerm of the snapshot.
 type DurableState struct {
-	CurrentTerm int        `json:"current_term"`
-	VotedFor    string     `json:"voted_for"`
-	Log         []LogEntry `json:"log"`
-	Snapshot    []byte     `json:"snapshot,omitempty"`
+	CurrentTerm   int               `json:"current_term"`
+	VotedFor      string            `json:"voted_for"`
+	Log           []LogEntry        `json:"log"`
+	Snapshot      []byte            `json:"snapshot,omitempty"`
+	SnapshotPeers map[string]string `json:"snapshot_peers,omitempty"`
+	SnapshotHTTP  map[string]string `json:"snapshot_http,omitempty"`
 }
 
 // Storage is durable Raft state.
@@ -96,10 +98,12 @@ func (n *RaftNode) persistLocked() {
 		return
 	}
 	st := DurableState{
-		CurrentTerm: n.currentTerm,
-		VotedFor:    n.votedFor,
-		Log:         n.log,
-		Snapshot:    n.snapshot,
+		CurrentTerm:   n.currentTerm,
+		VotedFor:      n.votedFor,
+		Log:           n.log,
+		Snapshot:      n.snapshot,
+		SnapshotPeers: n.basePeers,
+		SnapshotHTTP:  n.baseHTTP,
 	}
 	if err := n.storage.Save(st); err != nil {
 		n.logger.Error("persist failed", "err", err)

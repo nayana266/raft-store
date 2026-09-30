@@ -14,6 +14,10 @@ func (n *RaftNode) resetElectionTimerLocked() {
 // startElectionLocked converts this node to a candidate, votes for itself, and
 // requests votes from every other peer (Raft paper §5.2).
 func (n *RaftNode) startElectionLocked() {
+	if n.joining || !n.isVoterLocked() {
+		n.resetElectionTimerLocked()
+		return
+	}
 	n.state = Candidate
 	n.currentTerm++
 	n.votedFor = n.id

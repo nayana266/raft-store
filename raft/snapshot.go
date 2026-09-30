@@ -16,6 +16,8 @@ type InstallSnapshotRequest struct {
 	LastIncludedIndex int
 	LastIncludedTerm  int
 	Data              []byte
+	Peers             map[string]string
+	HTTP              map[string]string
 }
 
 // InstallSnapshotResponse is the InstallSnapshot RPC reply.
@@ -30,6 +32,8 @@ func (n *RaftNode) installSnapshotRequestLocked() *InstallSnapshotRequest {
 		LastIncludedIndex: n.lastIncludedIndexLocked(),
 		LastIncludedTerm:  n.lastIncludedTermLocked(),
 		Data:              append([]byte(nil), n.snapshot...),
+		Peers:             cloneStringMap(n.basePeers),
+		HTTP:              cloneStringMap(n.baseHTTP),
 	}
 }
 
@@ -61,9 +65,14 @@ func (n *RaftNode) compactLocked(index int) {
 	if si < 0 || si >= len(n.log) {
 		return
 	}
+	peers, httpAddrs := n.membershipAtLocked(index)
 	suffix := cloneEntries(n.log[si+1:])
 	n.log = append([]LogEntry{{Term: e.Term, Index: index}}, suffix...)
 	n.snapshot = data
+	n.basePeers = peers
+	n.baseHTTP = httpAddrs
+	n.rebuildMembershipLocked()
+	n.notifyPeersLocked()
 	n.persistLocked()
 	n.logger.Info("compacted log",
 		"last_included_index", index,
@@ -84,6 +93,7 @@ func (n *RaftNode) HandleInstallSnapshot(req *InstallSnapshotRequest) *InstallSn
 	}
 	n.leaderID = req.LeaderID
 	n.resetElectionTimerLocked()
+	n.joining = false
 	resp.Term = n.currentTerm
 
 	if req.LastIncludedIndex <= n.lastIncludedIndexLocked() {
@@ -92,6 +102,12 @@ func (n *RaftNode) HandleInstallSnapshot(req *InstallSnapshotRequest) *InstallSn
 
 	n.log = []LogEntry{{Term: req.LastIncludedTerm, Index: req.LastIncludedIndex}}
 	n.snapshot = append([]byte(nil), req.Data...)
+	if len(req.Peers) > 0 {
+		n.basePeers = cloneStringMap(req.Peers)
+		n.baseHTTP = cloneStringMap(req.HTTP)
+		n.rebuildMembershipLocked()
+		n.notifyPeersLocked()
+	}
 	if n.snapshotter != nil && len(n.snapshot) > 0 {
 		if err := n.snapshotter.Restore(n.snapshot); err != nil {
 			n.logger.Error("restore snapshot", "err", err)

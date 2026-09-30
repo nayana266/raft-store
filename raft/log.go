@@ -203,6 +203,7 @@ func (n *RaftNode) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntries
 	}
 	n.leaderID = req.LeaderID
 	n.resetElectionTimerLocked()
+	n.joining = false
 	resp.Term = n.currentTerm
 
 	if req.PrevLogIndex < n.lastIncludedIndexLocked() {
@@ -238,6 +239,8 @@ func (n *RaftNode) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntries
 		break
 	}
 	if logDirty {
+		n.rebuildMembershipLocked()
+		n.notifyPeersLocked()
 		n.persistLocked()
 	}
 
@@ -257,10 +260,18 @@ func (n *RaftNode) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntries
 func (n *RaftNode) appendEntriesLocked(entries []LogEntry, startIndex int) {
 	for i, e := range entries {
 		cmd := append([]byte(nil), e.Command...)
+		var ch *MembershipChange
+		if e.Change != nil {
+			cp := *e.Change
+			cp.Peers = cloneStringMap(e.Change.Peers)
+			cp.HTTPAddrs = cloneStringMap(e.Change.HTTPAddrs)
+			ch = &cp
+		}
 		n.log = append(n.log, LogEntry{
 			Term:    e.Term,
 			Index:   startIndex + i,
 			Command: cmd,
+			Change:  ch,
 		})
 	}
 }
@@ -295,7 +306,7 @@ func (n *RaftNode) applyCommittedLocked() {
 			break
 		}
 		n.lastApplied = next
-		if n.apply != nil {
+		if n.apply != nil && e.Change == nil {
 			n.apply(ApplyMsg{Index: next, Command: e.Command})
 		}
 	}

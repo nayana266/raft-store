@@ -23,7 +23,7 @@ type GRPCTransport struct {
 // NewGRPCTransport builds a client-side transport. addrs maps peer id → host:port.
 func NewGRPCTransport(addrs map[string]string) *GRPCTransport {
 	return &GRPCTransport{
-		addrs: addrs,
+		addrs: cloneStringMap(addrs),
 		conns: make(map[string]*grpc.ClientConn),
 	}
 }
@@ -36,6 +36,23 @@ func (t *GRPCTransport) Close() {
 		_ = c.Close()
 		delete(t.conns, id)
 	}
+}
+
+// SetPeerAddr updates the dial address for id (used when membership changes).
+func (t *GRPCTransport) SetPeerAddr(id, addr string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.addrs == nil {
+		t.addrs = map[string]string{}
+	}
+	if t.addrs[id] == addr {
+		return
+	}
+	if c, ok := t.conns[id]; ok {
+		_ = c.Close()
+		delete(t.conns, id)
+	}
+	t.addrs[id] = addr
 }
 
 func (t *GRPCTransport) client(to string) (pb.RaftClient, error) {
@@ -170,6 +187,14 @@ func appendReqToProto(r *AppendEntriesRequest) *pb.AppendEntriesRequest {
 	entries := make([]*pb.LogEntry, len(r.Entries))
 	for i, e := range r.Entries {
 		entries[i] = &pb.LogEntry{Term: int64(e.Term), Index: int64(e.Index), Command: e.Command}
+		if e.Change != nil {
+			entries[i].ChangeType = e.Change.Type
+			entries[i].ChangeId = e.Change.ID
+			entries[i].ChangeAddr = e.Change.Addr
+			entries[i].ChangeHttp = e.Change.HTTP
+			entries[i].ChangePeers = e.Change.Peers
+			entries[i].ChangeHttpAddrs = e.Change.HTTPAddrs
+		}
 	}
 	return &pb.AppendEntriesRequest{
 		Term:         int64(r.Term),
@@ -186,6 +211,16 @@ func appendReqFromProto(r *pb.AppendEntriesRequest) *AppendEntriesRequest {
 	for i, e := range r.Entries {
 		cmd := append([]byte(nil), e.Command...)
 		entries[i] = LogEntry{Term: int(e.Term), Index: int(e.Index), Command: cmd}
+		if e.ChangeType != "" || len(e.ChangePeers) > 0 {
+			entries[i].Change = &MembershipChange{
+				Type:      e.ChangeType,
+				ID:        e.ChangeId,
+				Addr:      e.ChangeAddr,
+				HTTP:      e.ChangeHttp,
+				Peers:     cloneStringMap(e.ChangePeers),
+				HTTPAddrs: cloneStringMap(e.ChangeHttpAddrs),
+			}
+		}
 	}
 	return &AppendEntriesRequest{
 		Term:         int(r.Term),
@@ -212,6 +247,8 @@ func installReqToProto(r *InstallSnapshotRequest) *pb.InstallSnapshotRequest {
 		LastIncludedIndex: int64(r.LastIncludedIndex),
 		LastIncludedTerm:  int64(r.LastIncludedTerm),
 		Data:              r.Data,
+		Peers:             r.Peers,
+		HttpAddrs:         r.HTTP,
 	}
 }
 
@@ -222,6 +259,8 @@ func installReqFromProto(r *pb.InstallSnapshotRequest) *InstallSnapshotRequest {
 		LastIncludedIndex: int(r.LastIncludedIndex),
 		LastIncludedTerm:  int(r.LastIncludedTerm),
 		Data:              append([]byte(nil), r.Data...),
+		Peers:             cloneStringMap(r.Peers),
+		HTTP:              cloneStringMap(r.HttpAddrs),
 	}
 }
 

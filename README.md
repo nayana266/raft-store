@@ -2,7 +2,7 @@
 
 A small distributed key-value store. Three (or more) Go processes form a cluster, elect a leader with Raft, and only acknowledge a write once a majority of nodes have it in their log.
 
-This phase covers leader election, log replication, a Get/Put API, a chaos control plane, on-disk Raft persistence, and **log compaction via snapshots**. There is no dynamic membership change yet.
+This phase covers leader election, log replication, a Get/Put API, a chaos control plane, on-disk Raft persistence, **log compaction via snapshots**, and **dynamic membership** (add or remove one node at a time).
 
 ## How it works
 
@@ -17,6 +17,8 @@ If the leader is killed or partitioned away, the remaining majority elects a new
 After enough entries have been applied (32 by default), a node **snapshots the map** and drops the prefix of the log that snapshot replaces. A follower that was offline long enough to miss those entries is caught up with `InstallSnapshot` instead of replaying the whole log.
 
 Inter-node RPCs (`RequestVote`, `AppendEntries`, `InstallSnapshot`) and the KV service travel over **gRPC**. A small HTTP API sits on top so you can poke the cluster with `curl`.
+
+A new configuration takes effect as soon as the leader **appends** it to the log (one add or remove at a time). A process started with `-join` will not run for leader until an existing leader replicates membership to it.
 
 ## Layout
 
@@ -120,6 +122,20 @@ Other knobs:
 | `POST /chaos/restart/n2` | Boot it again from `data/n2/state.json`; it reloads its snapshot + log. |
 | `POST /chaos/partition/n1/n2` | Cut only the n1↔n2 link. |
 | `POST /chaos/heal-all` | Clear isolations and pairwise cuts. |
+| `POST /cluster/add/n4` | Start n4 on 19104/18104 and append an add-member log entry. |
+| `POST /cluster/remove/n4` | Remove n4 from the Raft config, then stop it. The leader cannot remove itself. |
+
+Add a fourth node, write a key, then drop it again (`-dev` only). Use the curl tab, not the `go run` window:
+
+```bash
+curl -s -X POST http://127.0.0.1:18280/cluster/add/n4
+curl -s http://127.0.0.1:18280/cluster
+curl -s -X PUT http://127.0.0.1:18101/kv/after-add -d yes
+curl -s http://127.0.0.1:18104/kv/after-add
+curl -s -X POST http://127.0.0.1:18280/cluster/remove/n4
+```
+
+n4 is a joiner: it does not campaign until the leader has it in the config. After add, `/cluster` lists four peers. After remove, majority is three again.
 
 Isolate vs crash: isolate keeps HTTP alive, so a partitioned leader may still accept a Put and then **time out** (no majority). Crash makes `curl` to that port fail with connection refused.
 
@@ -146,4 +162,4 @@ go test ./... -race
 
 ## Not in this phase
 
-Dynamic membership (add/remove nodes at runtime). Snapshots, persistence, and chaos are in.
+Joint consensus for changing several nodes at once, and automatic leader handoff so the current leader can remove itself. One-at-a-time add/remove, snapshots, persistence, and chaos are in.

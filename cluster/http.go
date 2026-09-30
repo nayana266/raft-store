@@ -23,6 +23,8 @@ func Handler(c *Cluster) http.Handler {
 				"curl -s -X POST http://127.0.0.1:18280/chaos/restart/n2",
 				"curl -s -X POST http://127.0.0.1:18280/chaos/partition/n1/n2",
 				"curl -s -X POST http://127.0.0.1:18280/chaos/heal-all",
+				"curl -s -X POST http://127.0.0.1:18280/cluster/add/n4",
+				"curl -s -X POST http://127.0.0.1:18280/cluster/remove/n4",
 			},
 		})
 	})
@@ -51,6 +53,12 @@ func Handler(c *Cluster) http.Handler {
 	mux.HandleFunc("POST /chaos/heal-all", func(w http.ResponseWriter, r *http.Request) {
 		c.HealAll()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nodes": c.Snapshot()})
+	})
+	mux.HandleFunc("POST /cluster/add/{id}", func(w http.ResponseWriter, r *http.Request) {
+		chaos(w, c, func() error { return c.Add(r.PathValue("id"), "", "") })
+	})
+	mux.HandleFunc("POST /cluster/remove/{id}", func(w http.ResponseWriter, r *http.Request) {
+		chaos(w, c, func() error { return c.Remove(r.PathValue("id")) })
 	})
 	return mux
 }

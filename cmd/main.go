@@ -32,6 +32,7 @@ func main() {
 		dev       = flag.Bool("dev", false, "start a 3-node in-process cluster on ports 19101-19103 / 18101-18103")
 		data      = flag.String("data", "", "directory for this node's Raft log (default data/<id>)")
 		dataRoot  = flag.String("data-root", "data", "per-node data directories for -dev (data/n1, data/n2, data/n3)")
+		join      = flag.Bool("join", false, "start as a non-voting joiner until the leader adds this node")
 	)
 	flag.Parse()
 
@@ -64,17 +65,17 @@ func main() {
 		httpAddrs[*id] = *httpAddr
 	}
 
-	if err := runNode(*id, *raftAddr, *httpAddr, peerAddrs, httpAddrs, *data, logger); err != nil {
+	if err := runNode(*id, *raftAddr, *httpAddr, peerAddrs, httpAddrs, *data, *join, logger); err != nil {
 		logger.Error("node failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func runNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, dataDir string, logger *slog.Logger) error {
+func runNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, dataDir string, join bool, logger *slog.Logger) error {
 	if dataDir == "" {
 		dataDir = "data/" + id
 	}
-	node, _, gs, httpSrv, err := startNode(id, raftAddr, httpAddr, peerAddrs, httpAddrs, dataDir, logger)
+	node, _, gs, httpSrv, err := startNode(id, raftAddr, httpAddr, peerAddrs, httpAddrs, dataDir, join, logger)
 	if err != nil {
 		return err
 	}
@@ -96,11 +97,13 @@ func runNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]stri
 	return nil
 }
 
-func startNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, dataDir string, logger *slog.Logger) (*raft.RaftNode, *kv.Server, *grpc.Server, *http.Server, error) {
+func startNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]string, dataDir string, join bool, logger *slog.Logger) (*raft.RaftNode, *kv.Server, *grpc.Server, *http.Server, error) {
 	store := kv.NewStore()
 	cfg := raft.DefaultConfig(id, peerAddrs)
 	cfg.Logger = logger
 	cfg.Snapshotter = store
+	cfg.HTTPAddrs = httpAddrs
+	cfg.Join = join
 	if dataDir != "" {
 		cfg.Storage = raft.NewFileStorage(dataDir)
 	}
@@ -110,6 +113,9 @@ func startNode(id, raftAddr, httpAddr string, peerAddrs, httpAddrs map[string]st
 
 	transport := raft.NewGRPCTransport(peerAddrs)
 	node.SetTransport(transport)
+	node.SetPeerHook(func(peers, https map[string]string) {
+		kvSrv.SetHTTPAddrs(https)
+	})
 
 	gs, _, err := raft.ListenAndServeGRPC(raftAddr, node, func(gs *grpc.Server) {
 		kv.RegisterGRPC(gs, kvSrv)

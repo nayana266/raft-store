@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,6 +102,10 @@ func (c *Cluster) Stop() {
 }
 
 func (c *Cluster) startMember(id string) error {
+	return c.startMemberJoin(id, false)
+}
+
+func (c *Cluster) startMemberJoin(id string, join bool) error {
 	c.mu.Lock()
 	if m, ok := c.members[id]; ok && !m.Crashed {
 		c.mu.Unlock()
@@ -120,18 +126,32 @@ func (c *Cluster) startMember(id string) error {
 	httpAddr := cfg.HTTPAddrs[id]
 
 	store := kv.NewStore()
-	rCfg := raft.DefaultConfig(id, cfg.RaftAddrs)
+	peerAddrs := cloneAddrs(cfg.RaftAddrs)
+	httpAddrs := cloneAddrs(cfg.HTTPAddrs)
+	if join {
+		peerAddrs = map[string]string{id: raftAddr}
+		httpAddrs = map[string]string{}
+		if httpAddr != "" {
+			httpAddrs[id] = httpAddr
+		}
+	}
+	rCfg := raft.DefaultConfig(id, peerAddrs)
 	rCfg.Logger = logger
 	rCfg.Snapshotter = store
+	rCfg.HTTPAddrs = httpAddrs
+	rCfg.Join = join
 	if cfg.DataDir != "" {
 		rCfg.Storage = raft.NewFileStorage(filepath.Join(cfg.DataDir, id))
 	}
 	node := raft.NewNode(rCfg)
 	kvSrv := kv.NewServer(node, store)
-	kvSrv.SetHTTPAddrs(cfg.HTTPAddrs)
+	kvSrv.SetHTTPAddrs(cloneAddrs(cfg.HTTPAddrs))
 
 	grpcTr := raft.NewGRPCTransport(cfg.RaftAddrs)
 	node.SetTransport(raft.NewFilterTransport(id, grpcTr, c.faults))
+	node.SetPeerHook(func(peers, https map[string]string) {
+		kvSrv.SetHTTPAddrs(https)
+	})
 
 	var gs *grpc.Server
 	var err error
@@ -278,18 +298,19 @@ func (c *Cluster) mustExist(id string) error {
 
 // View is a JSON-friendly snapshot of one node for /cluster.
 type View struct {
-	ID            string `json:"id"`
-	State         string `json:"state"`
-	Term          int    `json:"term"`
-	LeaderID      string `json:"leader_id"`
-	LeaderHTTP    string `json:"leader_http,omitempty"`
-	CommitIndex   int    `json:"commit_index"`
-	SnapshotIndex int    `json:"snapshot_index"`
-	LogLen        int    `json:"log_len"`
-	KVSize        int    `json:"kv_size"`
-	HTTP          string `json:"http"`
-	Isolated      bool   `json:"isolated"`
-	Crashed       bool   `json:"crashed"`
+	ID            string   `json:"id"`
+	State         string   `json:"state"`
+	Term          int      `json:"term"`
+	LeaderID      string   `json:"leader_id"`
+	LeaderHTTP    string   `json:"leader_http,omitempty"`
+	CommitIndex   int      `json:"commit_index"`
+	SnapshotIndex int      `json:"snapshot_index"`
+	LogLen        int      `json:"log_len"`
+	KVSize        int      `json:"kv_size"`
+	Peers         []string `json:"peers,omitempty"`
+	HTTP          string   `json:"http"`
+	Isolated      bool     `json:"isolated"`
+	Crashed       bool     `json:"crashed"`
 }
 
 // Snapshot returns every node's current chaos + Raft status.
@@ -319,6 +340,7 @@ func (c *Cluster) Snapshot() []View {
 		v.SnapshotIndex = st.SnapshotIndex
 		v.LogLen = st.LogLen
 		v.KVSize = st.KVSize
+		v.Peers = st.Peers
 		out = append(out, v)
 	}
 	return out
@@ -338,4 +360,145 @@ func (c *Cluster) LeaderHTTP() string {
 		}
 	}
 	return ""
+}
+
+func cloneAddrs(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func (c *Cluster) leaderNode() *raft.RaftNode {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, id := range c.cfg.IDs {
+		m := c.members[id]
+		if m == nil || m.Crashed || m.Node == nil {
+			continue
+		}
+		if m.Node.IsLeader() {
+			return m.Node
+		}
+	}
+	return nil
+}
+
+// Add starts a new node and asks the leader to append a membership change.
+// For -dev, ids n4, n5, … default to raft 19104 / http 18104, etc.
+func (c *Cluster) Add(id, raftAddr, httpAddr string) error {
+	if id == "" {
+		return errors.New("id required")
+	}
+	if raftAddr == "" || httpAddr == "" {
+		r, h, err := defaultDevAddrs(id)
+		if err != nil {
+			return err
+		}
+		if raftAddr == "" {
+			raftAddr = r
+		}
+		if httpAddr == "" {
+			httpAddr = h
+		}
+	}
+
+	c.mu.Lock()
+	if m, ok := c.members[id]; ok && !m.Crashed {
+		c.mu.Unlock()
+		return fmt.Errorf("%s is already running", id)
+	}
+	if c.cfg.RaftAddrs == nil {
+		c.cfg.RaftAddrs = map[string]string{}
+	}
+	if c.cfg.HTTPAddrs == nil {
+		c.cfg.HTTPAddrs = map[string]string{}
+	}
+	c.cfg.RaftAddrs[id] = raftAddr
+	c.cfg.HTTPAddrs[id] = httpAddr
+	found := false
+	for _, existing := range c.cfg.IDs {
+		if existing == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		c.cfg.IDs = append(c.cfg.IDs, id)
+	}
+	c.mu.Unlock()
+
+	if err := c.startMemberJoin(id, true); err != nil {
+		return err
+	}
+
+	var leader *raft.RaftNode
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		leader = c.leaderNode()
+		if leader != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if leader == nil {
+		_ = c.Crash(id)
+		return errors.New("no leader to add member")
+	}
+	idx, err := leader.AddServer(id, raftAddr, httpAddr)
+	if err != nil {
+		_ = c.Crash(id)
+		return err
+	}
+	if err := leader.WaitApplied(idx, 3*time.Second); err != nil {
+		_ = c.Crash(id)
+		return err
+	}
+	c.logger.Info("cluster: added", "id", id, "raft", raftAddr, "http", httpAddr)
+	return nil
+}
+
+// Remove asks the leader to drop id, then stops that process.
+func (c *Cluster) Remove(id string) error {
+	leader := c.leaderNode()
+	if leader == nil {
+		return errors.New("no leader to remove member")
+	}
+	if leader.ID() == id {
+		return raft.ErrRemoveLeader
+	}
+	idx, err := leader.RemoveServer(id)
+	if err != nil {
+		return err
+	}
+	if err := leader.WaitApplied(idx, 3*time.Second); err != nil {
+		return err
+	}
+	_ = c.Crash(id)
+	c.mu.Lock()
+	delete(c.members, id)
+	delete(c.cfg.RaftAddrs, id)
+	delete(c.cfg.HTTPAddrs, id)
+	ids := c.cfg.IDs[:0]
+	for _, existing := range c.cfg.IDs {
+		if existing != id {
+			ids = append(ids, existing)
+		}
+	}
+	c.cfg.IDs = ids
+	c.mu.Unlock()
+	c.logger.Info("cluster: removed", "id", id)
+	return nil
+}
+
+func defaultDevAddrs(id string) (raftAddr, httpAddr string, err error) {
+	if !strings.HasPrefix(id, "n") {
+		return "", "", fmt.Errorf("need raft and http addresses for %s", id)
+	}
+	n, convErr := strconv.Atoi(id[1:])
+	if convErr != nil || n <= 0 {
+		return "", "", fmt.Errorf("need raft and http addresses for %s", id)
+	}
+	return fmt.Sprintf("127.0.0.1:%d", 19100+n), fmt.Sprintf("127.0.0.1:%d", 18100+n), nil
 }

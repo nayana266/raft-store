@@ -140,6 +140,12 @@ func (t *FilterTransport) SendInstallSnapshot(to string, req *InstallSnapshotReq
 	return t.inner.SendInstallSnapshot(to, req)
 }
 
+func (t *FilterTransport) SetPeerAddr(id, addr string) {
+	if s, ok := t.inner.(interface{ SetPeerAddr(string, string) }); ok {
+		s.SetPeerAddr(id, addr)
+	}
+}
+
 // Close closes the inner transport when it supports it.
 func (t *FilterTransport) Close() {
 	if c, ok := t.inner.(interface{ Close() }); ok {
