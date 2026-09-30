@@ -37,6 +37,8 @@ var (
 	ErrNotLeader = errors.New("not leader")
 	// ErrTimeout is returned when a proposal is not applied in time.
 	ErrTimeout = errors.New("timeout")
+	// ErrStaleLeader is returned when a leader cannot confirm a majority for a read.
+	ErrStaleLeader = errors.New("stale leader")
 	// ErrStopped is returned when the node has been shut down.
 	ErrStopped = errors.New("node stopped")
 	// ErrUnreachable is returned when a peer cannot be contacted.

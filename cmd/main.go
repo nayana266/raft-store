@@ -265,6 +265,13 @@ func writeErr(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	if errors.Is(err, raft.ErrStaleLeader) || errors.Is(err, raft.ErrTimeout) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"ok":    false,
+			"error": "stale_leader",
+		})
+		return
+	}
 	writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 }
 

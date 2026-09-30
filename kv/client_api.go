@@ -110,10 +110,15 @@ func (s *Server) Put(key, value string) error {
 	return nil
 }
 
-// Get reads the locally applied store. Only the leader serves reads.
+// Get is a linearizable read (Raft §6.4 ReadIndex). The leader confirms a
+// majority still accepts it, waits until that commit index is applied, then
+// reads the local map. An isolated leader returns an error instead of a stale value.
 func (s *Server) Get(key string) (string, bool, error) {
-	if !s.raft.IsLeader() {
-		return "", false, s.notLeader()
+	if _, err := s.raft.ReadIndex(s.timeout); err != nil {
+		if errors.Is(err, raft.ErrNotLeader) {
+			return "", false, s.notLeader()
+		}
+		return "", false, err
 	}
 	v, ok := s.store.Get(key)
 	return v, ok, nil

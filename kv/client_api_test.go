@@ -164,3 +164,29 @@ func TestPutSurvivesLeaderIsolation(t *testing.T) {
 	}
 	t.Fatalf("after failover Get = %q %v %v", v, ok, err)
 }
+
+func TestGetFailsOnIsolatedLeader(t *testing.T) {
+	net, servers := startKVCluster(t, "n1", "n2", "n3")
+	leader := leaderOf(t, servers)
+	if err := leader.Put("color", "blue"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	v, ok, err := leader.Get("color")
+	if err != nil || !ok || v != "blue" {
+		t.Fatalf("Get before isolate = %q %v %v", v, ok, err)
+	}
+
+	net.Isolate(leader.Node().ID())
+	_, _, err = leader.Get("color")
+	if err == nil {
+		t.Fatal("isolated leader served a stale Get")
+	}
+	if errors.Is(err, raft.ErrStaleLeader) || errors.Is(err, raft.ErrTimeout) || errors.Is(err, raft.ErrNotLeader) {
+		return
+	}
+	var nl *NotLeaderError
+	if errors.As(err, &nl) {
+		return
+	}
+	t.Fatalf("isolated Get err = %v, want stale/timeout/not-leader", err)
+}

@@ -2,7 +2,7 @@
 
 A small distributed key-value store. Three (or more) Go processes form a cluster, elect a leader with Raft, and only acknowledge a write once a majority of nodes have it in their log.
 
-This phase covers leader election, log replication, a Get/Put API, a chaos control plane, on-disk Raft persistence, **log compaction via snapshots**, and **dynamic membership** (add or remove one node at a time).
+This phase covers leader election, log replication, a Get/Put API, a chaos control plane, on-disk Raft persistence, **log compaction via snapshots**, **dynamic membership** (add or remove one node at a time), and **linearizable reads** (ReadIndex).
 
 ## Numbers (measured)
 
@@ -21,7 +21,7 @@ go run ./cmd -dev          # other terminal
 go run ./cmd/bench         # prints the table
 ```
 
-**57** Go tests cover election, replication, failover, persistence, snapshots, and membership (`go test ./...`).
+**61** Go tests cover election, replication, failover, persistence, snapshots, membership, and linearizable reads (`go test ./...`).
 
 ## How it works
 
@@ -29,7 +29,7 @@ Each node is a Raft participant plus an in-memory map.
 
 - **Followers** copy log entries from the leader and reject client reads/writes, pointing the client at the current leader.
 - **Candidates** appear when a follower hears no heartbeat before its randomized election timeout. They increment the term and ask for votes.
-- **Leaders** are the only nodes that accept `Get`/`Put`. A `Put` is appended to the leader's log and replicated with `AppendEntries`. It is committed when a majority of nodes have that entry, then applied to the map.
+- **Leaders** are the only nodes that accept `Get`/`Put`. A `Put` is appended to the leader's log and replicated with `AppendEntries`. It is committed when a majority of nodes have that entry, then applied to the map. A `Get` does **not** read the local map immediately: the leader runs ReadIndex (a heartbeat to a majority) so a partitioned leader cannot serve a stale value.
 
 If the leader is killed or partitioned away, the remaining majority elects a new one. Entries that already reached a majority survive; entries that did not are not acknowledged.
 
@@ -158,6 +158,20 @@ n4 is a joiner: it does not campaign until the leader has it in the config. Afte
 
 Isolate vs crash: isolate keeps HTTP alive, so a partitioned leader may still accept a Put and then **time out** (no majority). Crash makes `curl` to that port fail with connection refused.
 
+A Get on an isolated leader used to return the local map (stale). It now fails with `stale_leader` because ReadIndex needs a majority heartbeat. Use the leader from `/cluster` (example: n3 on 18103):
+
+```bash
+curl -s -X PUT http://127.0.0.1:18101/kv/color -d blue
+curl -s http://127.0.0.1:18280/cluster
+curl -s -X POST http://127.0.0.1:18280/chaos/isolate/n3
+curl -s http://127.0.0.1:18103/kv/color
+sleep 1
+curl -s http://127.0.0.1:18101/kv/color
+curl -s -X POST http://127.0.0.1:18280/chaos/heal-all
+```
+
+The Get on 18103 should be `"error":"stale_leader"`. After the majority elects, 18101 (or whoever is not isolated) returns `"value":"blue"`. If n3 is not the leader, isolate whoever `/cluster` lists as `leader_http`.
+
 ## Persistence
 
 Each node writes `data/<id>/state.json` (term, who it voted for, the remaining log, and the latest snapshot) before it acknowledges a vote or a log append. After a reboot the node restores the map from the snapshot, then waits for a leader to commit a current-term entry so any suffix after the snapshot can be applied.
@@ -172,7 +186,7 @@ Single-node process: `-data data/n1` (default `data/<id>`). Wipe the cluster wit
 
 ## Tests
 
-Election state transitions are unit-tested without sockets. Replication, failover, persistence, and snapshot catch-up use an in-memory network that can isolate a node:
+Election state transitions are unit-tested without sockets. Replication, failover, persistence, snapshot catch-up, and linearizable reads use an in-memory network that can isolate a node:
 
 ```bash
 go test ./...
@@ -181,4 +195,4 @@ go test ./... -race
 
 ## Not in this phase
 
-Joint consensus for changing several nodes at once, and automatic leader handoff so the current leader can remove itself. One-at-a-time add/remove, snapshots, persistence, and chaos are in.
+Joint consensus for changing several nodes at once, and automatic leader handoff so the current leader can remove itself. One-at-a-time add/remove, snapshots, persistence, chaos, and linearizable Get are in.
