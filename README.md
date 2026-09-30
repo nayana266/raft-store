@@ -4,6 +4,25 @@ A small distributed key-value store. Three (or more) Go processes form a cluster
 
 This phase covers leader election, log replication, a Get/Put API, a chaos control plane, on-disk Raft persistence, **log compaction via snapshots**, and **dynamic membership** (add or remove one node at a time).
 
+## Numbers (measured)
+
+These are the figures to put on a resume or LinkedIn. They come from `go run ./cmd/bench` against a live 3-node `go run ./cmd -dev` cluster on localhost. Every Put waits for a **majority commit** and an **fsync** of `data/<id>/state.json` — not an in-memory map.
+
+| What | Number | How to read it |
+|---|---|---|
+| Nodes | **3** (add a 4th) | Default cluster is n1–n3. `POST /cluster/add/n4` grows it to 4; remove brings it back to 3. |
+| Throughput | **~650 committed Puts/sec** concurrent, **~130/sec** sequential | Peak: 16 HTTP clients, 1000 Puts → 661/sec (0 failures). One client, 500 Puts → 131/sec. |
+| Fault scenarios | **6** | Isolate, heal, crash, restart-from-disk, pairwise partition, heal-all. Membership add/remove is separate. |
+
+Sustained load is a bit lower because snapshots fire every 32 applied entries and `state.json` grows: 8 clients × 3000 Puts → **541/sec**. Use **~650** as the headline concurrent number, and say **majority + fsync** if someone asks what you measured.
+
+```bash
+go run ./cmd -dev          # other terminal
+go run ./cmd/bench         # prints the table
+```
+
+**57** Go tests cover election, replication, failover, persistence, snapshots, and membership (`go test ./...`).
+
 ## How it works
 
 Each node is a Raft participant plus an in-memory map.
